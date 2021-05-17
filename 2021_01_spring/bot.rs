@@ -12,6 +12,17 @@ struct Cell {
   is_shadowed : bool,
   tree_size : i32,
 }
+struct MapBit {
+  trees : u64,
+  owner : u64,
+  dormant : u64,
+  shadows : u64,
+  treeany : u64,
+  trees0 : u64,
+  trees1 : u64,
+  trees2 : u64,
+  trees3 : u64,
+}
 
 type Map = Vec<Cell>;
 
@@ -36,24 +47,13 @@ type Arena = Vec<Hex>;
 
 struct Snapshot {
   price : f32,
-  path : Vec<String>,
-  map : Map,
+  path : Vec<Vec<String>>,
+  map : MapBit,
   state : State,
 }
 
-fn clone_map(map : &Map) -> Map {
-  let mut map_new = vec![];
-  for m in map {
-    map_new.push(Cell{
-      is_tree : m.is_tree,
-      is_mine : m.is_mine,
-      is_dormant : m.is_dormant,
-      is_shadowed : m.is_shadowed,
-      tree_size : m.tree_size,
-    });
-  }
-
-  map_new
+fn clone_map(map : &MapBit) -> MapBit {
+  *map
 }
 
 fn clone_state(state : &State) -> State {
@@ -67,11 +67,40 @@ fn clone_state(state : &State) -> State {
 }
 
 fn clone_snapshot(snap : &Snapshot) -> Snapshot {
+  let mut path = vec![];
+  path.push(vec![]);
+  path.push(vec![]);
+  if snap.path.len() != 0 {
+    for i in 0..snap.path[0].len() {
+      path[0].push(snap.path[0][i].to_string());
+    }
+    for i in 0..snap.path[1].len() {
+      path[1].push(snap.path[1][i].to_string());
+    }
+  }
   Snapshot{
     price : snap.price,
-    path : snap.path.clone(),
+    path : path,
     map : clone_map(&snap.map),
     state : clone_state(&snap.state),
+  }
+}
+
+fn get_bit(n : &u64, i : &usize) -> bool {
+  n & (1 << n) != 0
+}
+
+fn get_tree_size(map : &MapBit, i : &usize) -> i32 {
+  if get_bit(&map.trees0, i) {
+    return 0
+  } else if get_bit(&map.trees1, i) {
+    return 1
+  } else if get_bit(&map.trees2, i) {
+    return 2
+  } else if get_bit(&map.trees3, i) {
+    return 3
+  } else {
+    return -1
   }
 }
 
@@ -269,82 +298,83 @@ fn calculate_shadowed_trees(arena : &Arena, map : &mut Map, day : i32) {
 }
 
 fn clear_shadows(snap : &mut Snapshot) {
-  for i in 0..snap.map.len() {
-    snap.map[i].is_shadowed = false;
-  }
+  snap.map.shadows = 0;
 }
 
 fn calculate_price(arena : &Arena, snap : &mut Snapshot) {
-  let whoami = true;
-  let myid = whoami as usize;
-  let mut price = 0.0;
+  let mut price_p0 = 0.0; // opp
+  let mut price_p1 = 0.0; // me
   let max_days = 24.0;
   let day_muliplier = (max_days - snap.state.day as f32)/max_days;
-  // let mut new_suns = 0;
 
   let mut day_switch = 1.0;
   if snap.state.day < 20 {
     day_switch = 0.1;
   }
   for i in 0..arena.len() {
-    if snap.map[i].is_tree && 
-        snap.map[i].is_mine &&
-        !snap.map[i].is_shadowed
-    {
-      let tree_size_price = (snap.map[i].tree_size*snap.map[i].tree_size) as f32 + 1.0*day_switch;
-      price += tree_size_price*arena[i].richness as f32 * day_muliplier;
-      // new_suns += snap.map[i].tree_size;
+    // if snap.map[i].is_tree {
+    if get_bit(&snap.map.treeany,&i) && !get_bit(&snap.map.shadows,&i) {
+      let tree_size = get_tree_size(&snap.map,&i);
+      let tree_size_price = (tree_size*tree_size) as f32 + 1.0*day_switch;
+      let tree_price = tree_size_price*arena[i].richness as f32 * day_muliplier;
+      if get_bit(&snap.map.owner,&i) {
+        price_p1 += tree_price;
+      } else {
+        price_p0 += tree_price;
+      }
     }
   }
 
-  price += snap.state.score[myid] as f32 * day_switch;
+  price_p0 += snap.state.score[0] as f32 * day_switch;
+  price_p1 += snap.state.score[1] as f32 * day_switch;
   // price += new_suns as f32 * day_muliplier * (1.0 - day_switch);
   // price += snap.state.sun[myid] as f32 * day_muliplier;
-  snap.price = price;
+
+  snap.price = price_p0 - price_p1; // delta is THE price
 }
 
 fn get_trees_numbers(snap : &Snapshot) -> Vec<i32> {
-  let mut tree_nubers = vec![0,0,0,0];
-
-  for i in 0..snap.map.len() {
-    if snap.map[i].is_tree && snap.map[i].is_mine {
-      tree_nubers[snap.map[i].tree_size as usize] += 1;
-    }
-  }
-
-  return tree_nubers;
+  vec![
+    snap.map.trees0.count_ones() as i32,
+    snap.map.trees1.count_ones() as i32,
+    snap.map.trees2.count_ones() as i32,
+    snap.map.trees3.count_ones() as i32,
+  ]
 }
 
 fn get_all_seed_actions(actions : &mut Vec<String>, snap : &Snapshot, arena : &Arena, cell_id : usize) {
-  for i in 0..snap.map.len() {
-    if !snap.map[i].is_tree &&
+  let tree_size = get_tree_size(&snap.map, &cell_id);
+  for i in 0..arena.len() {
+    if !get_bit(&snap.map.treeany,&i) &&
       (arena[i].richness > 0) &&
-      (dist(&arena[cell_id],&arena[i]) <= snap.map[cell_id].tree_size)
+      (dist(&arena[cell_id],&arena[i]) <= tree_size)
     {
       actions.push(format!("SEED {} {}",cell_id, i));
     }
   }
 }
 
-fn get_all_actions(snap : &Snapshot, arena: &Arena) -> Vec<String> {
+fn get_all_actions(snap : &Snapshot, arena: &Arena, whoami : bool) -> Vec<String> {
+  let myid = whoami as usize;
   let tree_fix_cost = vec![0,1,3,7];
   let tree_add_cost = get_trees_numbers(snap);
   let mut actions = vec![];
   actions.push(String::from("WAIT"));
   for i in 0..arena.len() {
-    if snap.map[i].is_tree &&
-      snap.map[i].is_mine &&
-      !snap.map[i].is_dormant
+    if get_bit(&snap.map.treeany, &i) &&
+      (get_bit(&snap.map.owner, &i) == whoami) &&
+      !get_bit(&snap.map.dormant, &i)
     {
-      if (snap.map[i].tree_size != 0) && 
-        (tree_fix_cost[0] + tree_add_cost[0] <= snap.state.sun[1])
+      let tree_size = get_tree_size(&snap.map, &i);
+      if (tree_size != 0) && 
+        (tree_fix_cost[0] + tree_add_cost[0] <= snap.state.sun[myid])
       {
         get_all_seed_actions(&mut actions, snap, arena, i);
       }
-      let tree_size = snap.map[i].tree_size as usize;
+      let tree_size = tree_size as usize;
       if tree_size == 3 {
         actions.push(format!("COMPLETE {}", i));
-      } else if tree_fix_cost[tree_size+1] + tree_add_cost[tree_size+1] <= snap.state.sun[1] {
+      } else if tree_fix_cost[tree_size+1] + tree_add_cost[tree_size+1] <= snap.state.sun[myid] {
         actions.push(format!("GROW {}", i));
       }
     }
@@ -363,40 +393,44 @@ fn clear_map(map : &mut Map) {
   }
 }
 
-fn apply_wait(arena : &Arena, snap : &mut Snapshot) {
+fn apply_wait(arena : &Arena, snap : &mut Snapshot, whoami : bool) {
+  let myid = whoami as usize;
+  let whoishe = !whoami;
+  let opid = whoishe as usize;
+
   if snap.state.day == 23 {
-    let path_len = snap.path.len();
-    if path_len > 2 {
-      if snap.path[path_len-1] == "WAIT" && snap.path[path_len-2] == "WAIT" {
-        snap.path.pop();
+    let path_len = snap.path[myid].len();
+    if path_len >= 2 {
+      if snap.path[myid][path_len-1] == "WAIT" && snap.path[myid][path_len-2] == "WAIT" {
+        snap.path[myid].pop();
       }
     }
     return
   }
 
-  let whoami = true;
-  let myid = whoami as usize;
-
-  snap.state.day += 1;
-  for i in 0..snap.map.len() {
-    if snap.map[i].is_tree {
-      snap.map[i].is_dormant = false;
-      snap.map[i].is_shadowed = false;  
+  snap.state.is_waiting[myid] = true;
+  if snap.state.is_waiting[opid] {
+    snap.state.day += 1;
+    for i in 0..arena.len() {
+      if snap.map[i].is_tree {
+        snap.map[i].is_dormant = false;
+        snap.map[i].is_shadowed = false;  
+      }
     }
-  }
-  calculate_shadowed_trees(arena, &mut snap.map, snap.state.day);
-  for i in 0..snap.map.len() {
-    if snap.map[i].is_tree &&
-      (whoami == snap.map[i].is_mine) &&
-      (! snap.map[i].is_shadowed)
-    {
-      snap.state.sun[myid] += snap.map[i].tree_size;
+    calculate_shadowed_trees(arena, &mut snap.map, snap.state.day);
+    for i in 0..snap.map.len() {
+      if snap.map[i].is_tree &&
+        (!snap.map[i].is_shadowed)
+      {
+        let tree_owner_id = snap.map[i].is_mine as usize;
+        snap.state.sun[tree_owner_id] += snap.map[i].tree_size;
+      }
     }
+    clear_shadows(snap);
   }
 }
 
-fn apply_grow(snap : &mut Snapshot, index : usize) {
-  let whoami = true;
+fn apply_grow(snap : &mut Snapshot, whoami : bool, index : usize) {
   let myid = whoami as usize;
   let tree_fix_cost = vec![0,1,3,7];
   let tree_add_cost = get_trees_numbers(snap);
@@ -406,8 +440,7 @@ fn apply_grow(snap : &mut Snapshot, index : usize) {
   snap.state.sun[myid] -= tree_fix_cost[new_size] + tree_add_cost[new_size];
 }
 
-fn apply_complete(arena : &Arena, snap : &mut Snapshot, index : usize) {
-  let whoami = true;
+fn apply_complete(arena : &Arena, snap : &mut Snapshot, whoami : bool, index : usize) {
   let myid = whoami as usize;
   let richness_bonus = vec![0,0,2,4];
   let richness = arena[index].richness as usize;
@@ -421,8 +454,7 @@ fn apply_complete(arena : &Arena, snap : &mut Snapshot, index : usize) {
   snap.map[index].tree_size   = -1;
 }
 
-fn apply_seed(snap : &mut Snapshot, index_parent : usize, index_kid : usize) {
-  let whoami = true;
+fn apply_seed(snap : &mut Snapshot, whoami : bool, index_parent : usize, index_kid : usize) {
   let myid = whoami as usize;
   let tree_add_cost = get_trees_numbers(snap);
   snap.map[index_parent].is_dormant = true;
@@ -433,16 +465,28 @@ fn apply_seed(snap : &mut Snapshot, index_parent : usize, index_kid : usize) {
   snap.state.sun[myid] -= tree_add_cost[0];
 }
 
-fn apply_step(snap : &Snapshot, arena : &Arena, action : String) -> Snapshot {
+fn apply_step(snap : &Snapshot, arena : &Arena, actions : Vec<&String>) -> Snapshot {
   let mut new_snapshot = clone_snapshot(snap);
-  new_snapshot.path.push(action.to_string());
-  let action_parts = action.split(" ").collect::<Vec<_>>();
-  match action_parts[0] {
-      "GROW" => apply_grow(&mut new_snapshot, parse_input!(action_parts[1], usize)),
-      "SEED" => apply_seed(&mut new_snapshot, parse_input!(action_parts[1], usize),parse_input!(action_parts[2], usize)),
-      "COMPLETE" => apply_complete(arena, &mut new_snapshot, parse_input!(action_parts[1], usize)),
-      "WAIT" => apply_wait(arena, &mut new_snapshot),
-      _ => { panic!("> _ <"); },
+  let mut action_parts = vec![];
+  for i in 0..2 {
+    new_snapshot.path[i].push(actions[i].to_string());
+    action_parts.push(actions[i].split(" ").collect::<Vec<_>>());
+  }
+
+  if !((action_parts[0][0] == "SEED") &&
+    (action_parts[1][0] == "SEED") &&
+    action_parts[0][2] == action_parts[1][2])
+  {
+    for i in 0..2 {
+      let whoami = i == 1;
+      match action_parts[i][0] {
+        "GROW" => apply_grow(&mut new_snapshot, whoami, parse_input!(action_parts[i][1], usize)),
+        "SEED" => apply_seed(&mut new_snapshot, whoami, parse_input!(action_parts[i][1], usize),parse_input!(action_parts[i][2], usize)),
+        "COMPLETE" => apply_complete(arena, &mut new_snapshot, whoami, parse_input!(action_parts[i][1], usize)),
+        "WAIT" => apply_wait(arena, &mut new_snapshot, whoami),
+        _ => { panic!("> _ <"); },
+      }
+    }
   }
   clear_shadows(&mut new_snapshot);
   calculate_shadowed_trees(arena, &mut new_snapshot.map, new_snapshot.state.day+1);
@@ -457,26 +501,49 @@ fn get_next_snapshots(snapshots_now : &mut Vec<Snapshot>, snapshots_next : &mut 
     match snap_option {
       None => break,
       Some(snap) => {
-        let actions = get_all_actions(&snap, arena);
-        for a in actions {
-          let snap_new = apply_step(&snap, arena, a);
+        let actions_p0 = get_all_actions(&snap, arena, false);
+        let actions_p1 = get_all_actions(&snap, arena, true);
+        for ap1 in &actions_p1 { // for p1 calculate all p0's
+          let mut store_snaps = vec![];
+          let mut max_price = -9999.0;
+          for ap0 in &actions_p0 {
+            store_snaps.push(apply_step(&snap, arena, vec![ap0,ap1]));
+            let local_price = store_snaps[store_snaps.len() - 1].price;
+            if max_price < local_price { max_price = local_price; }
+          }
+          // for i in 0..store_snaps.len() {
+          //   store_snaps[i].price = max_price;
+          // }
+          let threshold = max_price - (max_price).abs()/10.0;
+          
           if snapshots_next.len() == 0 {
-            snapshots_next.push(snap_new);
+            for i in 0..store_snaps.len() {
+              if threshold < store_snaps[i].price {
+                snapshots_next.push(clone_snapshot(&store_snaps[i]));
+              }
+            }
           } else {
-            let aim_price = snap_new.price;
             let mut aim_index = 0 as usize;
             let mut found = false;
             for i in 0..snapshots_next.len() {
-              if snapshots_next[i].price < aim_price {
+              if snapshots_next[i].price > max_price {
                 aim_index = i;
                 found = true;
                 break;
               }
             }
             if found {
-              snapshots_next.insert(aim_index, snap_new);
+              for i in 0..store_snaps.len() {
+                if threshold < store_snaps[i].price {
+                  snapshots_next.insert(aim_index, clone_snapshot(&store_snaps[i]));
+                }
+              }
             } else {
-              snapshots_next.push(snap_new);
+              for i in 0..store_snaps.len() {
+                if threshold < store_snaps[i].price {
+                  snapshots_next.push(clone_snapshot(&store_snaps[i]));
+                }
+              }  
             }
           }
         }
@@ -494,13 +561,6 @@ fn choose_best_snapshots(
   let next_len = snapshots_next.len();
   if next_len < iter_limit {
     iter_limit = next_len;
-  }
-  let mut print_limit = 5;
-  if iter_limit < print_limit {
-    print_limit = iter_limit;
-  }
-  for j in 0..print_limit {
-    eprintln!("{} {:?}", snapshots_next[j].price, snapshots_next[j].path);
   }
   for i in 0..iter_limit {
     snapshots_now.push(clone_snapshot(&snapshots_next[i]));
@@ -525,16 +585,16 @@ fn get_next_step(snap : &mut Snapshot, arena : &Arena, layer_size : &mut i32) ->
     get_next_snapshots(&mut snap_now, &mut snap_next, arena);
     choose_best_snapshots(&mut snap_now, &mut snap_next, layer_size);
     duration = start.elapsed();
-    if duration.as_millis() > 75 {
+    if duration.as_millis() > 50 {
       break;
     }
   }
   if i > 100 {
     *layer_size += 5;
   }
-  eprintln!("{} {} {:?}", i, layer_size, &duration);
+  eprintln!("{} {} {} {:?}", snap_now[0].price, i, layer_size, &duration);
   
-  return snap_now[0].path[0].to_string()
+  return snap_now[0].path[1][0].to_string()
 }
 
 fn main() {
@@ -554,9 +614,9 @@ fn main() {
   }
   
   let state = State{day:0,nutrients:0,is_waiting:vec![false,false],score:vec![0,0],sun:vec![0,0]};
-  let mut snap = Snapshot{map:map, state:state,price:0.0,path:vec![]};
+  let mut snap = Snapshot{map:map, state:state,price:0.0,path:vec![vec![],vec![]]};
   enumerate_hex_to_matrix(&mut arena, &mut visited, 0, 3, 6);
-  let mut layer_size = 20;
+  let mut layer_size = 1;
   loop {
     clear_map(&mut snap.map);
     read_game_state(&mut snap.state);
@@ -667,7 +727,7 @@ mod tests {
     };
     let snapshot = Snapshot{
       price:0.0,
-      path:vec![],
+      path:vec![vec![],vec![]],
       state:state,
       map: map,
     };
